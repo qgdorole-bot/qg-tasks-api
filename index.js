@@ -1,19 +1,19 @@
 const express = require('express');
 const { Pool, Client } = require('pg');
+
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
+  max: 20,
 });
 
 const WEBHOOK_URL = 'https://kmrgqtzovewplbwxjwtm.supabase.co/functions/v1/webhook-quest-concluida';
 
-// === Setup: criar coluna TrilhaPacienteId + trigger ===
 async function setupTrigger() {
   try {
-    // Adicionar coluna TrilhaPacienteId se não existir
     await pool.query(`
       DO $$
       BEGIN
@@ -27,7 +27,6 @@ async function setupTrigger() {
     `);
     console.log('Coluna TrilhaPacienteId verificada/criada.');
 
-    // Trigger que envia quest_id + status + trilha_paciente_id
     await pool.query(`
       CREATE OR REPLACE FUNCTION heroku.notify_quest_completed()
       RETURNS trigger AS $$
@@ -54,7 +53,6 @@ async function setupTrigger() {
   }
 }
 
-// === Listener: escuta quests concluídas/falhadas e dispara webhook ===
 async function startQuestListener() {
   let client;
   try {
@@ -72,18 +70,11 @@ async function startQuestListener() {
       const status = parts[1];
       const trilhaPacienteId = parts[2] || null;
       const questStatus = status === '1' ? 'completed' : 'failed';
-
       console.log(`Quest ${questId} status: ${questStatus}, trilha_paciente_id: ${trilhaPacienteId || 'nenhum'}`);
 
       try {
-        const webhookBody = {
-          quest_id: questId,
-          quest_status: questStatus,
-        };
-        // Enviar trilha_paciente_id se disponível (identificação precisa)
-        if (trilhaPacienteId) {
-          webhookBody.trilha_paciente_id = trilhaPacienteId;
-        }
+        const webhookBody = { quest_id: questId, quest_status: questStatus };
+        if (trilhaPacienteId) webhookBody.trilha_paciente_id = trilhaPacienteId;
 
         const response = await fetch(WEBHOOK_URL, {
           method: 'POST',
@@ -114,10 +105,66 @@ async function startQuestListener() {
   }
 }
 
+// Helper: buscar player por nome
+async function findPlayer(client, nome) {
+  let result = await client.query(
+    `SELECT "Id", "Name" FROM heroku."Players"
+     WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
+     AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+     LIMIT 1`,
+    [nome]
+  );
+  if (result.rows.length === 0) {
+    const firstName = nome.trim().split(' ')[0];
+    result = await client.query(
+      `SELECT "Id", "Name" FROM heroku."Players"
+       WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
+       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       LIMIT 1`,
+      [firstName]
+    );
+  }
+  return result.rows[0] || null;
+}
+
+// Helper: criar quest + vínculos
+async function createQuest(client, player, descricao, moedas, level, ganha_carta, trilha_paciente_id) {
+  const questResult = await client.query(
+    `INSERT INTO heroku."Quests"
+     ("Description", "CoinToEarn", "LevelToEarn", "Status", "CreatedAt", "CreatedDate", "IsSequential", "Order", "TrilhaPacienteId")
+     VALUES ($1, $2, $3, 0, NOW(), NOW(), false, 0, $4)
+     RETURNING "Id"`,
+    [descricao, moedas, level, trilha_paciente_id || null]
+  );
+  const questId = questResult.rows[0].Id;
+
+  await client.query(
+    `INSERT INTO heroku."QuestPlayer" ("QuestId", "PlayerId") VALUES ($1, $2)`,
+    [questId, player.Id]
+  );
+
+  let cardId = null;
+  if (ganha_carta) {
+    const cardResult = await client.query(
+      `SELECT "Id" FROM heroku."Cards"
+       WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       ORDER BY RANDOM() LIMIT 1`
+    );
+    if (cardResult.rows.length > 0) {
+      cardId = cardResult.rows[0].Id;
+      await client.query(
+        `INSERT INTO heroku."QuestCard" ("QuestId", "CardId") VALUES ($1, $2)`,
+        [questId, cardId]
+      );
+    }
+  }
+
+  return { id: questId, player: player.Name, description: descricao, coins: moedas, level, card: cardId, trilha_paciente_id: trilha_paciente_id || null };
+}
+
 // POST /api/quests — cria tarefa para um paciente
 app.post('/api/quests', async (req, res) => {
   const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id } = req.body;
-
   if (!nome_paciente || !descricao) {
     return res.status(400).json({ error: 'nome_paciente e descricao são obrigatórios' });
   }
@@ -125,84 +172,62 @@ app.post('/api/quests', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    // Tentar match exato primeiro
-    let playerResult = await client.query(
-      `SELECT "Id", "Name" FROM heroku."Players"
-       WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
-       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
-       LIMIT 1`,
-      [nome_paciente]
-    );
-
-    // Se não encontrou, tentar pelo primeiro nome
-    if (playerResult.rows.length === 0) {
-      const firstName = nome_paciente.trim().split(' ')[0];
-      playerResult = await client.query(
-        `SELECT "Id", "Name" FROM heroku."Players"
-         WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
-         AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
-         LIMIT 1`,
-        [firstName]
-      );
-    }
-
-    if (playerResult.rows.length === 0) {
+    const player = await findPlayer(client, nome_paciente);
+    if (!player) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: `Jogador "${nome_paciente}" não encontrado` });
     }
+    const quest = await createQuest(client, player, descricao, moedas, level, ganha_carta, trilha_paciente_id);
+    await client.query('COMMIT');
+    res.json({ success: true, quest });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao criar quest:', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
-    const player = playerResult.rows[0];
+// POST /api/quests/batch — cria tarefas em lote (uma transação)
+app.post('/api/quests/batch', async (req, res) => {
+  const { quests } = req.body;
+  if (!Array.isArray(quests) || quests.length === 0) {
+    return res.status(400).json({ error: 'quests array é obrigatório' });
+  }
 
-    // Criar quest COM trilha_paciente_id
-    const questResult = await client.query(
-      `INSERT INTO heroku."Quests"
-       ("Description", "CoinToEarn", "LevelToEarn", "Status", "CreatedAt", "CreatedDate", "IsSequential", "Order", "TrilhaPacienteId")
-       VALUES ($1, $2, $3, 0, NOW(), NOW(), false, 0, $4)
-       RETURNING "Id"`,
-      [descricao, moedas, level, trilha_paciente_id || null]
-    );
+  const client = await pool.connect();
+  const results = [];
+  try {
+    await client.query('BEGIN');
 
-    const questId = questResult.rows[0].Id;
-
-    await client.query(
-      `INSERT INTO heroku."QuestPlayer" ("QuestId", "PlayerId") VALUES ($1, $2)`,
-      [questId, player.Id]
-    );
-
-    let cardId = null;
-    if (ganha_carta) {
-      const cardResult = await client.query(
-        `SELECT "Id" FROM heroku."Cards"
-         WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
-         ORDER BY RANDOM() LIMIT 1`
-      );
-      if (cardResult.rows.length > 0) {
-        cardId = cardResult.rows[0].Id;
-        await client.query(
-          `INSERT INTO heroku."QuestCard" ("QuestId", "CardId") VALUES ($1, $2)`,
-          [questId, cardId]
-        );
+    for (let i = 0; i < quests.length; i++) {
+      const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id } = quests[i];
+      if (!nome_paciente || !descricao) {
+        results.push({ success: false, index: i, error: 'nome_paciente e descricao obrigatórios' });
+        continue;
+      }
+      try {
+        const player = await findPlayer(client, nome_paciente);
+        if (!player) {
+          results.push({ success: false, index: i, error: `Jogador "${nome_paciente}" não encontrado` });
+          continue;
+        }
+        const quest = await createQuest(client, player, descricao, moedas, level, ganha_carta, trilha_paciente_id);
+        results.push({ success: true, index: i, quest });
+      } catch (itemErr) {
+        results.push({ success: false, index: i, error: itemErr.message });
       }
     }
 
     await client.query('COMMIT');
-
-    res.json({
-      success: true,
-      quest: {
-        id: questId,
-        player: player.Name,
-        description: descricao,
-        coins: moedas,
-        level,
-        card: cardId,
-        trilha_paciente_id: trilha_paciente_id || null,
-      },
-    });
+    const succeeded = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
+    console.log(`Batch: ${succeeded} ok, ${failed} failed out of ${quests.length}`);
+    res.json({ success: true, total: quests.length, succeeded, failed, results });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('Erro ao criar quest:', err);
+    console.error('Erro no batch:', err);
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
@@ -215,9 +240,7 @@ app.post('/api/players', async (req, res) => {
   if (!nome) {
     return res.status(400).json({ error: 'nome é obrigatório' });
   }
-
   try {
-    // Verificar se já existe
     const existing = await pool.query(
       `SELECT "Id", "Name" FROM heroku."Players"
        WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
@@ -225,19 +248,15 @@ app.post('/api/players', async (req, res) => {
        LIMIT 1`,
       [nome]
     );
-
     if (existing.rows.length > 0) {
       return res.json({ success: true, player: existing.rows[0], already_existed: true });
     }
-
-    // Criar novo
     const result = await pool.query(
       `INSERT INTO heroku."Players" ("Name", "CreatedAt", "IsDeleted")
        VALUES ($1, NOW(), false)
        RETURNING "Id", "Name"`,
       [nome.trim()]
     );
-
     res.json({ success: true, player: result.rows[0], already_existed: false });
   } catch (err) {
     console.error('Erro ao criar player:', err);
@@ -263,6 +282,7 @@ app.get('/api/quests/player/:name', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 // DELETE /api/quests/:id — deleta quest pendente
 app.delete('/api/quests/:id', async (req, res) => {
   const questId = req.params.id;
@@ -294,7 +314,6 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'qgtasks-bridge' });
 });
 
-// Inicializar
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Bridge running on port ${PORT}`);
