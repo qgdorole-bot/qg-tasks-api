@@ -99,13 +99,26 @@ app.post('/api/quests', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const playerResult = await client.query(
+    // Tentar match exato primeiro
+    let playerResult = await client.query(
       `SELECT "Id", "Name" FROM heroku."Players" 
        WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1)) 
        AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
        LIMIT 1`,
       [nome_paciente]
     );
+
+    // Se não encontrou, tentar pelo primeiro nome
+    if (playerResult.rows.length === 0) {
+      const firstName = nome_paciente.trim().split(' ')[0];
+      playerResult = await client.query(
+        `SELECT "Id", "Name" FROM heroku."Players" 
+         WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1)) 
+         AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+         LIMIT 1`,
+        [firstName]
+      );
+    }
 
     if (playerResult.rows.length === 0) {
       await client.query('ROLLBACK');
@@ -197,7 +210,6 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Bridge running on port ${PORT}`);
-  // Setup trigger e listener APÓS o servidor iniciar
   setupTrigger()
     .then(() => startQuestListener())
     .catch(err => console.error('Init error:', err.message));
