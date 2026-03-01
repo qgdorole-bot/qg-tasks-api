@@ -288,46 +288,6 @@ app.delete('/api/quests/:id', async (req, res) => {
     client.release();
   }
 });
-// POST /api/quests/batch — cria múltiplas quests de uma vez
-app.post('/api/quests/batch', async (req, res) => {
-  const { quests } = req.body;
-  if (!Array.isArray(quests) || quests.length === 0) {
-    return res.status(400).json({ error: 'quests array é obrigatório' });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const results = [];
-
-    for (const q of quests) {
-      const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id } = q;
-
-      let playerResult = await client.query(
-        `SELECT "Id", "Name" FROM heroku."Players"
-         WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
-         AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
-         LIMIT 1`,
-        [nome_paciente]
-      );
-
-      if (playerResult.rows.length === 0) {
-        results.push({ success: false, nome: nome_paciente, error: 'Jogador não encontrado' });
-        continue;
-      }
-
-      const player = playerResult.rows[0];
-      const questResult = await client.query(
-        `INSERT INTO heroku."Quests"
-         ("Description", "CoinToEarn", "LevelToEarn", "Status", "CreatedAt", "CreatedDate", "IsSequential", "Order", "TrilhaPacienteId")
-         VALUES ($1, $2, $3, 0, NOW(), NOW(), false, 0, $4)
-         RETURNING "Id"`,
-        [descricao, moedas, level, trilha_paciente_id || null]
-      );
-
-      const questId = questResult.rows[0].Id;
-      await client.query(
-        `I
 
 // Health check
 app.get('/', (req, res) => {
