@@ -9,7 +9,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// POST /api/quests — cria tarefa para um paciente
 app.post('/api/quests', async (req, res) => {
   const { nome_paciente, descricao, moedas = 0, level = 1, ganha_carta = false } = req.body;
 
@@ -21,7 +20,6 @@ app.post('/api/quests', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1. Buscar player pelo nome (SCHEMA HEROKU)
     const playerResult = await client.query(
       `SELECT "Id", "Name" FROM heroku."Players" WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1)) LIMIT 1`,
       [nome_paciente]
@@ -34,23 +32,20 @@ app.post('/api/quests', async (req, res) => {
 
     const player = playerResult.rows[0];
 
-    // 2. Criar a Quest
     const questResult = await client.query(
-      `INSERT INTO heroku."Quests" ("Id", "Description", "Coins", "Level", "IsActive", "CreatedAt")
-       VALUES (gen_random_uuid(), $1, $2, $3, true, NOW())
+      `INSERT INTO heroku."Quests" ("Description", "CoinToEarn", "LevelToEarn", "Status", "CreatedAt", "CreatedDate", "IsSequential", "Order")
+       VALUES ($1, $2, $3, 1, NOW(), NOW(), false, 0)
        RETURNING "Id"`,
       [descricao, moedas, level]
     );
     const questId = questResult.rows[0].Id;
 
-    // 3. Vincular Quest ao Player
     await client.query(
       `INSERT INTO heroku."QuestPlayer" ("QuestsId", "PlayersId")
        VALUES ($1, $2)`,
       [questId, player.Id]
     );
 
-    // 4. Se ganha carta, sortear uma carta aleatória
     let cardId = null;
     if (ganha_carta) {
       const cardResult = await client.query(
@@ -70,14 +65,7 @@ app.post('/api/quests', async (req, res) => {
 
     res.json({
       success: true,
-      quest: {
-        id: questId,
-        player: player.Name,
-        description: descricao,
-        coins: moedas,
-        level,
-        card: cardId,
-      },
+      quest: { id: questId, player: player.Name, description: descricao, coins: moedas, level, card: cardId },
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -88,12 +76,9 @@ app.post('/api/quests', async (req, res) => {
   }
 });
 
-// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'qgtasks-bridge' });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Bridge running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Bridge running on port ${PORT}`));
