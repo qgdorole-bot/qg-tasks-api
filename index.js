@@ -263,6 +263,31 @@ app.get('/api/quests/player/:name', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// DELETE /api/quests/:id — deleta quest pendente
+app.delete('/api/quests/:id', async (req, res) => {
+  const questId = req.params.id;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM heroku."QuestPlayer" WHERE "QuestId" = $1', [questId]);
+    await client.query('DELETE FROM heroku."QuestCard" WHERE "QuestId" = $1', [questId]);
+    const result = await client.query(
+      'DELETE FROM heroku."Quests" WHERE "Id" = $1 AND "Status" = 0 RETURNING "Id"',
+      [questId]
+    );
+    await client.query('COMMIT');
+    if (result.rows.length === 0) {
+      return res.json({ success: true, message: 'Quest não encontrada ou já concluída' });
+    }
+    res.json({ success: true, deleted: questId });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao deletar quest:', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 // Health check
 app.get('/', (req, res) => {
