@@ -1,6 +1,5 @@
 const express = require('express');
 const { Pool, Client } = require('pg');
-
 const app = express();
 app.use(express.json());
 
@@ -11,22 +10,39 @@ const pool = new Pool({
 
 const WEBHOOK_URL = 'https://kmrgqtzovewplbwxjwtm.supabase.co/functions/v1/webhook-quest-concluida';
 
-// === Setup: criar trigger no banco se não existir ===
+// === Setup: criar coluna TrilhaPacienteId + trigger ===
 async function setupTrigger() {
   try {
+    // Adicionar coluna TrilhaPacienteId se não existir
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'heroku' AND table_name = 'Quests' AND column_name = 'TrilhaPacienteId'
+        ) THEN
+          ALTER TABLE heroku."Quests" ADD COLUMN "TrilhaPacienteId" text DEFAULT NULL;
+        END IF;
+      END $$;
+    `);
+    console.log('Coluna TrilhaPacienteId verificada/criada.');
+
+    // Trigger que envia quest_id + status + trilha_paciente_id
     await pool.query(`
       CREATE OR REPLACE FUNCTION heroku.notify_quest_completed()
       RETURNS trigger AS $$
       BEGIN
         IF NEW."Status" IN (1, 2) AND (OLD."Status" IS NULL OR OLD."Status" = 0) THEN
-          PERFORM pg_notify('quest_status_changed', NEW."Id"::text || ':' || NEW."Status"::text);
+          PERFORM pg_notify(
+            'quest_status_changed',
+            NEW."Id"::text || ':' || NEW."Status"::text || ':' || COALESCE(NEW."TrilhaPacienteId", '')
+          );
         END IF;
         RETURN NEW;
       END;
       $$ LANGUAGE plpgsql;
 
       DROP TRIGGER IF EXISTS trg_quest_completed ON heroku."Quests";
-
       CREATE TRIGGER trg_quest_completed
       AFTER UPDATE ON heroku."Quests"
       FOR EACH ROW
@@ -51,15 +67,28 @@ async function startQuestListener() {
     console.log('Listening for quest status changes...');
 
     client.on('notification', async (msg) => {
-      const [questId, status] = msg.payload.split(':');
+      const parts = msg.payload.split(':');
+      const questId = parts[0];
+      const status = parts[1];
+      const trilhaPacienteId = parts[2] || null;
       const questStatus = status === '1' ? 'completed' : 'failed';
-      console.log(`Quest ${questId} status: ${questStatus}`);
+
+      console.log(`Quest ${questId} status: ${questStatus}, trilha_paciente_id: ${trilhaPacienteId || 'nenhum'}`);
 
       try {
+        const webhookBody = {
+          quest_id: questId,
+          quest_status: questStatus,
+        };
+        // Enviar trilha_paciente_id se disponível (identificação precisa)
+        if (trilhaPacienteId) {
+          webhookBody.trilha_paciente_id = trilhaPacienteId;
+        }
+
         const response = await fetch(WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ quest_id: questId, quest_status: questStatus }),
+          body: JSON.stringify(webhookBody),
         });
         const body = await response.text();
         console.log('Webhook response:', response.status, body);
@@ -99,8 +128,8 @@ app.post('/api/quests', async (req, res) => {
 
     // Tentar match exato primeiro
     let playerResult = await client.query(
-      `SELECT "Id", "Name" FROM heroku."Players" 
-       WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1)) 
+      `SELECT "Id", "Name" FROM heroku."Players"
+       WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
        AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
        LIMIT 1`,
       [nome_paciente]
@@ -110,8 +139,8 @@ app.post('/api/quests', async (req, res) => {
     if (playerResult.rows.length === 0) {
       const firstName = nome_paciente.trim().split(' ')[0];
       playerResult = await client.query(
-        `SELECT "Id", "Name" FROM heroku."Players" 
-         WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1)) 
+        `SELECT "Id", "Name" FROM heroku."Players"
+         WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
          AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
          LIMIT 1`,
         [firstName]
@@ -125,12 +154,13 @@ app.post('/api/quests', async (req, res) => {
 
     const player = playerResult.rows[0];
 
+    // Criar quest COM trilha_paciente_id
     const questResult = await client.query(
-      `INSERT INTO heroku."Quests" 
-       ("Description", "CoinToEarn", "LevelToEarn", "Status", "CreatedAt", "CreatedDate", "IsSequential", "Order")
-       VALUES ($1, $2, $3, 0, NOW(), NOW(), false, 0)
+      `INSERT INTO heroku."Quests"
+       ("Description", "CoinToEarn", "LevelToEarn", "Status", "CreatedAt", "CreatedDate", "IsSequential", "Order", "TrilhaPacienteId")
+       VALUES ($1, $2, $3, 0, NOW(), NOW(), false, 0, $4)
        RETURNING "Id"`,
-      [descricao, moedas, level]
+      [descricao, moedas, level, trilha_paciente_id || null]
     );
 
     const questId = questResult.rows[0].Id;
@@ -143,7 +173,7 @@ app.post('/api/quests', async (req, res) => {
     let cardId = null;
     if (ganha_carta) {
       const cardResult = await client.query(
-        `SELECT "Id" FROM heroku."Cards" 
+        `SELECT "Id" FROM heroku."Cards"
          WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
          ORDER BY RANDOM() LIMIT 1`
       );
@@ -179,11 +209,47 @@ app.post('/api/quests', async (req, res) => {
   }
 });
 
+// POST /api/players — cria jogador se não existir
+app.post('/api/players', async (req, res) => {
+  const { nome } = req.body;
+  if (!nome) {
+    return res.status(400).json({ error: 'nome é obrigatório' });
+  }
+
+  try {
+    // Verificar se já existe
+    const existing = await pool.query(
+      `SELECT "Id", "Name" FROM heroku."Players"
+       WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
+       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       LIMIT 1`,
+      [nome]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.json({ success: true, player: existing.rows[0], already_existed: true });
+    }
+
+    // Criar novo
+    const result = await pool.query(
+      `INSERT INTO heroku."Players" ("Name", "CreatedAt", "IsDeleted")
+       VALUES ($1, NOW(), false)
+       RETURNING "Id", "Name"`,
+      [nome.trim()]
+    );
+
+    res.json({ success: true, player: result.rows[0], already_existed: false });
+  } catch (err) {
+    console.error('Erro ao criar player:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/quests/player/:name — lista quests pendentes
 app.get('/api/quests/player/:name', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT q."Id", q."Description", q."CoinToEarn", q."LevelToEarn", q."Status", q."CreatedAt"
+      `SELECT q."Id", q."Description", q."CoinToEarn", q."LevelToEarn", q."Status", q."CreatedAt", q."TrilhaPacienteId"
        FROM heroku."Quests" q
        JOIN heroku."QuestPlayer" qp ON qp."QuestId" = q."Id"
        JOIN heroku."Players" p ON p."Id" = qp."PlayerId"
