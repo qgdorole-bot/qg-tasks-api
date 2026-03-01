@@ -1,5 +1,6 @@
 const express = require('express');
 const { Pool, Client } = require('pg');
+
 const app = express();
 app.use(express.json());
 
@@ -17,29 +18,27 @@ async function setupTrigger() {
       CREATE OR REPLACE FUNCTION heroku.notify_quest_completed()
       RETURNS trigger AS $$
       BEGIN
-        IF NEW."Status" = 1 AND (OLD."Status" IS NULL OR OLD."Status" != 1) THEN
-          PERFORM pg_notify('quest_completed', NEW."Id"::text);
+        IF NEW."Status" IN (1, 2) AND (OLD."Status" IS NULL OR OLD."Status" = 0) THEN
+          PERFORM pg_notify('quest_status_changed', NEW."Id"::text || ':' || NEW."Status"::text);
         END IF;
         RETURN NEW;
       END;
       $$ LANGUAGE plpgsql;
 
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_quest_completed') THEN
-          CREATE TRIGGER trg_quest_completed
-          AFTER UPDATE ON heroku."Quests"
-          FOR EACH ROW
-          EXECUTE FUNCTION heroku.notify_quest_completed();
-        END IF;
-      END $$;
+      DROP TRIGGER IF EXISTS trg_quest_completed ON heroku."Quests";
+
+      CREATE TRIGGER trg_quest_completed
+      AFTER UPDATE ON heroku."Quests"
+      FOR EACH ROW
+      EXECUTE FUNCTION heroku.notify_quest_completed();
     `);
-    console.log('Trigger quest_completed configurado!');
+    console.log('Trigger quest_status_changed configurado!');
   } catch (err) {
     console.error('Erro ao configurar trigger:', err.message);
   }
 }
 
-// === Listener: escuta quests concluídas e dispara webhook ===
+// === Listener: escuta quests concluídas/falhadas e dispara webhook ===
 async function startQuestListener() {
   let client;
   try {
@@ -47,20 +46,20 @@ async function startQuestListener() {
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false },
     });
-
     await client.connect();
-    await client.query('LISTEN quest_completed');
-    console.log('Listening for quest completions...');
+    await client.query('LISTEN quest_status_changed');
+    console.log('Listening for quest status changes...');
 
     client.on('notification', async (msg) => {
-      const questId = msg.payload;
-      console.log('Quest completed:', questId);
+      const [questId, status] = msg.payload.split(':');
+      const questStatus = status === '1' ? 'completed' : 'failed';
+      console.log(`Quest ${questId} status: ${questStatus}`);
 
       try {
         const response = await fetch(WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ quest_id: questId }),
+          body: JSON.stringify({ quest_id: questId, quest_status: questStatus }),
         });
         const body = await response.text();
         console.log('Webhook response:', response.status, body);
@@ -79,7 +78,6 @@ async function startQuestListener() {
       console.log('Listener disconnected, reconnecting...');
       setTimeout(startQuestListener, 5000);
     });
-
   } catch (err) {
     console.error('Failed to start listener:', err.message);
     if (client) { try { client.end(); } catch (e) {} }
@@ -89,7 +87,7 @@ async function startQuestListener() {
 
 // POST /api/quests — cria tarefa para um paciente
 app.post('/api/quests', async (req, res) => {
-  const { nome_paciente, descricao, moedas = 0, level = 1, ganha_carta = false, trilha_paciente_id } = req.body;
+  const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id } = req.body;
 
   if (!nome_paciente || !descricao) {
     return res.status(400).json({ error: 'nome_paciente e descricao são obrigatórios' });
@@ -172,7 +170,6 @@ app.post('/api/quests', async (req, res) => {
         trilha_paciente_id: trilha_paciente_id || null,
       },
     });
-
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Erro ao criar quest:', err);
