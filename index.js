@@ -69,13 +69,11 @@ async function startQuestListener() {
       const status = parts[1];
       const trilhaPacienteId = parts[2] || null;
       const questStatus = status === '1' ? 'completed' : 'failed';
-
       console.log(`Quest ${questId} status: ${questStatus}, trilha_paciente_id: ${trilhaPacienteId || 'nenhum'}`);
 
       try {
         const webhookBody = { quest_id: questId, quest_status: questStatus };
         if (trilhaPacienteId) webhookBody.trilha_paciente_id = trilhaPacienteId;
-
         const response = await fetch(WEBHOOK_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -105,7 +103,6 @@ async function startQuestListener() {
   }
 }
 
-// Helper: buscar player por nome
 async function findPlayer(client, nome) {
   let result = await client.query(
     `SELECT "Id", "Name" FROM heroku."Players"
@@ -127,7 +124,6 @@ async function findPlayer(client, nome) {
   return result.rows[0] || null;
 }
 
-// Helper: criar quest + vínculos
 async function createQuest(client, player, descricao, moedas, level, ganha_carta, trilha_paciente_id) {
   const questResult = await client.query(
     `INSERT INTO heroku."Quests"
@@ -158,17 +154,15 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
       );
     }
   }
-
   return { id: questId, player: player.Name, description: descricao, coins: moedas, level, card: cardId, trilha_paciente_id: trilha_paciente_id || null };
 }
 
-// POST /api/quests — cria tarefa para um paciente
+// POST /api/quests
 app.post('/api/quests', async (req, res) => {
   const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id } = req.body;
   if (!nome_paciente || !descricao) {
     return res.status(400).json({ error: 'nome_paciente e descricao são obrigatórios' });
   }
-
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -189,13 +183,12 @@ app.post('/api/quests', async (req, res) => {
   }
 });
 
-// POST /api/quests/batch — cria tarefas em lote (uma transação)
+// POST /api/quests/batch
 app.post('/api/quests/batch', async (req, res) => {
   const { quests } = req.body;
   if (!Array.isArray(quests) || quests.length === 0) {
     return res.status(400).json({ error: 'quests array é obrigatório' });
   }
-
   const client = await pool.connect();
   const results = [];
   try {
@@ -232,7 +225,7 @@ app.post('/api/quests/batch', async (req, res) => {
   }
 });
 
-// POST /api/players — cria jogador se não existir
+// POST /api/players — cria jogador
 app.post('/api/players', async (req, res) => {
   const { nome } = req.body;
   if (!nome) {
@@ -262,25 +255,23 @@ app.post('/api/players', async (req, res) => {
   }
 });
 
-// ============ NOVO ENDPOINT ============
-// GET /api/players — lista todos os players com levels
+// GET /api/players — lista todos os players (SEM "Coins")
 app.get('/api/players', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT "Id", "Name", "Level", "Coins"
+      `SELECT "Id", "Name", "Level"
        FROM heroku."Players"
        WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
        ORDER BY "Name"`
     );
     res.json({ players: result.rows });
   } catch (err) {
-    console.error('Error fetching players:', err);
+    console.error('Erro ao buscar players:', err);
     res.status(500).json({ error: err.message });
   }
 });
-// =======================================
 
-// GET /api/quests/player/:name — lista quests pendentes
+// GET /api/quests/player/:name
 app.get('/api/quests/player/:name', async (req, res) => {
   try {
     const result = await pool.query(
@@ -299,7 +290,7 @@ app.get('/api/quests/player/:name', async (req, res) => {
   }
 });
 
-// DELETE /api/quests/:id — deleta quest pendente
+// DELETE /api/quests/:id
 app.delete('/api/quests/:id', async (req, res) => {
   const questId = req.params.id;
   const client = await pool.connect();
@@ -331,21 +322,6 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.get('/api/players', async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT "Id", "Name", "Level"
-       FROM heroku."Players"
-       WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
-       ORDER BY "Name"`
-    );
-    res.json({ players: result.rows });
-  } catch (err) {
-    console.error('Erro ao buscar players:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.listen(PORT, () => {
   console.log(`Bridge running on port ${PORT}`);
   setupTrigger()
