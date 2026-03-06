@@ -144,7 +144,7 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
     [questId, player.Id]
   );
 
-  // Link quest to groups
+  // Link quest to groups via GroupQuest (GroupsId, QuestsId)
   let linkedGroups = [];
   if (grupos && Array.isArray(grupos) && grupos.length > 0) {
     for (const grupoNome of grupos) {
@@ -160,8 +160,8 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
         if (groupResult.rows.length > 0) {
           const groupId = groupResult.rows[0].Id;
           await client.query(
-            `INSERT INTO heroku."QuestGroup" ("QuestId", "GroupId") VALUES ($1, $2)`,
-            [questId, groupId]
+            `INSERT INTO heroku."GroupQuest" ("GroupsId", "QuestsId") VALUES ($1, $2)`,
+            [groupId, questId]
           );
           linkedGroups.push({ name: groupResult.rows[0].Name, id: groupId });
           console.log(`Quest ${questId} linked to group "${groupResult.rows[0].Name}" (${groupId})`);
@@ -348,7 +348,7 @@ app.delete('/api/quests/:id', async (req, res) => {
     await client.query('BEGIN');
     await client.query('DELETE FROM heroku."QuestPlayer" WHERE "QuestId" = $1', [questId]);
     await client.query('DELETE FROM heroku."QuestCard" WHERE "QuestId" = $1', [questId]);
-    await client.query('DELETE FROM heroku."QuestGroup" WHERE "QuestId" = $1', [questId]);
+    await client.query('DELETE FROM heroku."GroupQuest" WHERE "QuestsId" = $1', [questId]);
     const result = await client.query(
       'DELETE FROM heroku."Quests" WHERE "Id" = $1 AND "Status" = 0 RETURNING "Id"',
       [questId]
