@@ -331,6 +331,21 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+app.get('/api/players', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT "Id", "Name", "Level"
+       FROM heroku."Players"
+       WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       ORDER BY "Name"`
+    );
+    res.json({ players: result.rows });
+  } catch (err) {
+    console.error('Erro ao buscar players:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Bridge running on port ${PORT}`);
   setupTrigger()
