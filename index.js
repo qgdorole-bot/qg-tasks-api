@@ -1,6 +1,5 @@
 const express = require('express');
 const { Pool, Client } = require('pg');
-
 const app = express();
 app.use(express.json({ limit: '5mb' }));
 
@@ -70,6 +69,7 @@ async function startQuestListener() {
       const status = parts[1];
       const trilhaPacienteId = parts[2] || null;
       const questStatus = status === '1' ? 'completed' : 'failed';
+
       console.log(`Quest ${questId} status: ${questStatus}, trilha_paciente_id: ${trilhaPacienteId || 'nenhum'}`);
 
       try {
@@ -200,7 +200,6 @@ app.post('/api/quests/batch', async (req, res) => {
   const results = [];
   try {
     await client.query('BEGIN');
-
     for (let i = 0; i < quests.length; i++) {
       const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id } = quests[i];
       if (!nome_paciente || !descricao) {
@@ -219,7 +218,6 @@ app.post('/api/quests/batch', async (req, res) => {
         results.push({ success: false, index: i, error: itemErr.message });
       }
     }
-
     await client.query('COMMIT');
     const succeeded = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;
@@ -263,6 +261,24 @@ app.post('/api/players', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ============ NOVO ENDPOINT ============
+// GET /api/players — lista todos os players com levels
+app.get('/api/players', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT "Id", "Name", "Level", "Coins"
+       FROM heroku."Players"
+       WHERE ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       ORDER BY "Name"`
+    );
+    res.json({ players: result.rows });
+  } catch (err) {
+    console.error('Error fetching players:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+// =======================================
 
 // GET /api/quests/player/:name — lista quests pendentes
 app.get('/api/quests/player/:name', async (req, res) => {
