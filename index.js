@@ -106,6 +106,7 @@ async function startQuestListener() {
 }
 
 async function findPlayer(client, nome) {
+  // 1) Exact match (case-insensitive, trimmed)
   let result = await client.query(
     `SELECT "Id", "Name" FROM heroku."Players"
      WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
@@ -114,6 +115,35 @@ async function findPlayer(client, nome) {
     [nome]
   );
 
+  // 2) Unaccented match using translate
+  if (result.rows.length === 0) {
+    result = await client.query(
+      `SELECT "Id", "Name" FROM heroku."Players"
+       WHERE LOWER(TRIM(translate("Name",
+         'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ',
+         'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn'
+       ))) = LOWER(TRIM(translate($1,
+         'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ',
+         'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn'
+       )))
+       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       LIMIT 1`,
+      [nome]
+    );
+  }
+
+  // 3) ILIKE contains match
+  if (result.rows.length === 0) {
+    result = await client.query(
+      `SELECT "Id", "Name" FROM heroku."Players"
+       WHERE "Name" ILIKE '%' || $1 || '%'
+       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       LIMIT 1`,
+      [nome.trim()]
+    );
+  }
+
+  // 4) First name fallback
   if (result.rows.length === 0) {
     const firstName = nome.trim().split(' ')[0];
     result = await client.query(
@@ -139,12 +169,13 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
 
   const questId = questResult.rows[0].Id;
 
+  // Link quest to player
   await client.query(
     `INSERT INTO heroku."QuestPlayer" ("QuestId", "PlayerId") VALUES ($1, $2)`,
     [questId, player.Id]
   );
 
-  // Link quest to groups via GroupQuest (GroupsId, QuestsId)
+  // Link quest to groups
   let linkedGroups = [];
   if (grupos && Array.isArray(grupos) && grupos.length > 0) {
     for (const grupoNome of grupos) {
@@ -160,8 +191,8 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
         if (groupResult.rows.length > 0) {
           const groupId = groupResult.rows[0].Id;
           await client.query(
-            `INSERT INTO heroku."GroupQuest" ("GroupsId", "QuestsId") VALUES ($1, $2)`,
-            [groupId, questId]
+            `INSERT INTO heroku."QuestGroup" ("QuestId", "GroupId") VALUES ($1, $2)`,
+            [questId, groupId]
           );
           linkedGroups.push({ name: groupResult.rows[0].Name, id: groupId });
           console.log(`Quest ${questId} linked to group "${groupResult.rows[0].Name}" (${groupId})`);
@@ -174,6 +205,7 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
     }
   }
 
+  // Link card if applicable
   let cardId = null;
   if (ganha_carta) {
     const cardResult = await client.query(
@@ -202,6 +234,7 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
   };
 }
 
+// POST /api/quests
 app.post('/api/quests', async (req, res) => {
   const { nome_paciente, descricao, moedas = 2, level = 2, ganha_carta = false, trilha_paciente_id, grupos } = req.body;
 
@@ -231,6 +264,7 @@ app.post('/api/quests', async (req, res) => {
   }
 });
 
+// POST /api/quests/batch
 app.post('/api/quests/batch', async (req, res) => {
   const { quests } = req.body;
   if (!Array.isArray(quests) || quests.length === 0) {
@@ -275,6 +309,7 @@ app.post('/api/quests/batch', async (req, res) => {
   }
 });
 
+// POST /api/players — cria jogador
 app.post('/api/players', async (req, res) => {
   const { nome } = req.body;
   if (!nome) {
@@ -308,6 +343,7 @@ app.post('/api/players', async (req, res) => {
   }
 });
 
+// GET /api/players — lista todos os players
 app.get('/api/players', async (req, res) => {
   try {
     const result = await pool.query(
@@ -323,6 +359,7 @@ app.get('/api/players', async (req, res) => {
   }
 });
 
+// GET /api/quests/player/:name
 app.get('/api/quests/player/:name', async (req, res) => {
   try {
     const result = await pool.query(
@@ -341,6 +378,7 @@ app.get('/api/quests/player/:name', async (req, res) => {
   }
 });
 
+// DELETE /api/quests/:id
 app.delete('/api/quests/:id', async (req, res) => {
   const questId = req.params.id;
   const client = await pool.connect();
@@ -348,7 +386,7 @@ app.delete('/api/quests/:id', async (req, res) => {
     await client.query('BEGIN');
     await client.query('DELETE FROM heroku."QuestPlayer" WHERE "QuestId" = $1', [questId]);
     await client.query('DELETE FROM heroku."QuestCard" WHERE "QuestId" = $1', [questId]);
-    await client.query('DELETE FROM heroku."GroupQuest" WHERE "QuestsId" = $1', [questId]);
+    await client.query('DELETE FROM heroku."QuestGroup" WHERE "QuestId" = $1', [questId]);
     const result = await client.query(
       'DELETE FROM heroku."Quests" WHERE "Id" = $1 AND "Status" = 0 RETURNING "Id"',
       [questId]
@@ -368,6 +406,7 @@ app.delete('/api/quests/:id', async (req, res) => {
   }
 });
 
+// POST /api/db/query — debug endpoint
 app.post('/api/db/query', async (req, res) => {
   const { sql } = req.body;
   if (!sql) {
@@ -381,6 +420,7 @@ app.post('/api/db/query', async (req, res) => {
   }
 });
 
+// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'qgtasks-bridge' });
 });
