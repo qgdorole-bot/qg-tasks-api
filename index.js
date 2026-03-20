@@ -158,6 +158,8 @@ async function findPlayer(client, nome) {
   return result.rows[0] || null;
 }
 
+// findOrCreatePlayer removed — only search, never auto-create
+
 async function createQuest(client, player, descricao, moedas, level, ganha_carta, trilha_paciente_id, grupos) {
   const questResult = await client.query(
     `INSERT INTO heroku."Quests"
@@ -247,7 +249,6 @@ app.post('/api/quests', async (req, res) => {
     await client.query('BEGIN');
     const player = await findPlayer(client, nome_paciente);
     if (!player) {
-      await client.query('ROLLBACK');
       return res.status(404).json({ error: `Jogador "${nome_paciente}" não encontrado` });
     }
 
