@@ -106,54 +106,76 @@ async function startQuestListener() {
 }
 
 async function findPlayer(client, nome) {
+  const cleanedName = nome.trim();
+  const accentChars = 'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ';
+  const plainChars = 'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn';
+  const normalizedNameExpr = `LOWER(TRIM(translate("Name", '${accentChars}', '${plainChars}')))`;
+
   // 1) Exact match (case-insensitive, trimmed)
   let result = await client.query(
     `SELECT "Id", "Name" FROM heroku."Players"
      WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
      AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
      LIMIT 1`,
-    [nome]
+    [cleanedName]
   );
+  if (result.rows.length > 0) return result.rows[0];
 
-  // 2) Unaccented match using translate
-  if (result.rows.length === 0) {
+  // 2) Unaccented exact match
+  result = await client.query(
+    `SELECT "Id", "Name" FROM heroku."Players"
+     WHERE ${normalizedNameExpr} = LOWER(TRIM(translate($1, '${accentChars}', '${plainChars}')))
+     AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+     LIMIT 1`,
+    [cleanedName]
+  );
+  if (result.rows.length > 0) return result.rows[0];
+
+  // 3) Token-based match ignoring particles like de/do/dos/da
+  const stopwords = new Set(['de', 'da', 'do', 'das', 'dos', 'e']);
+  const relevantTokens = cleanedName
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !stopwords.has(token));
+
+  if (relevantTokens.length > 0) {
+    const tokenClauses = relevantTokens.map(
+      (_, index) => `${normalizedNameExpr} LIKE '%' || $${index + 1} || '%'`
+    );
+
     result = await client.query(
       `SELECT "Id", "Name" FROM heroku."Players"
-       WHERE LOWER(TRIM(translate("Name",
-         'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ',
-         'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn'
-       ))) = LOWER(TRIM(translate($1,
-         'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ',
-         'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn'
-       )))
+       WHERE ${tokenClauses.join(' AND ')}
        AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+       ORDER BY LENGTH(TRIM("Name")) ASC, "Name" ASC
        LIMIT 1`,
-      [nome]
+      relevantTokens
     );
   }
+  if (result.rows.length > 0) return result.rows[0];
 
-  // 3) ILIKE contains match
-  if (result.rows.length === 0) {
-    result = await client.query(
-      `SELECT "Id", "Name" FROM heroku."Players"
-       WHERE "Name" ILIKE '%' || $1 || '%'
-       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
-       LIMIT 1`,
-      [nome.trim()]
-    );
-  }
+  // 4) ILIKE contains match with full name
+  result = await client.query(
+    `SELECT "Id", "Name" FROM heroku."Players"
+     WHERE "Name" ILIKE '%' || $1 || '%'
+     AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+     LIMIT 1`,
+    [cleanedName]
+  );
+  if (result.rows.length > 0) return result.rows[0];
 
-  // 4) First name fallback
-  if (result.rows.length === 0) {
-    const firstName = nome.trim().split(' ')[0];
-    result = await client.query(
-      `SELECT "Id", "Name" FROM heroku."Players"
-       WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
-       AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
-       LIMIT 1`,
-      [firstName]
-    );
-  }
+  // 5) First name fallback
+  const firstName = cleanedName.split(' ')[0];
+  result = await client.query(
+    `SELECT "Id", "Name" FROM heroku."Players"
+     WHERE LOWER(TRIM("Name")) = LOWER(TRIM($1))
+     AND ("IsDeleted" IS NULL OR "IsDeleted" = false)
+     LIMIT 1`,
+    [firstName]
+  );
 
   return result.rows[0] || null;
 }
