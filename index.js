@@ -214,10 +214,11 @@ async function createQuest(client, player, descricao, moedas, level, ganha_carta
 
         if (groupResult.rows.length > 0) {
           const groupId = groupResult.rows[0].Id;
-          await client.query(
-            `INSERT INTO heroku."QuestGroup" ("QuestId", "GroupId") VALUES ($1, $2)`,
-            [questId, groupId]
+                    await client.query(
+            `INSERT INTO heroku."GroupQuest" ("GroupsId", "QuestsId") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [groupId, questId]
           );
+
           linkedGroups.push({ name: groupResult.rows[0].Name, id: groupId });
           console.log(`Quest ${questId} linked to group "${groupResult.rows[0].Name}" (${groupId})`);
         } else {
